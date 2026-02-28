@@ -54,23 +54,28 @@ jobs:
       - name: Validate repaired ICS
         run: |
           python << 'PY'
+          import re
           from icalendar import Calendar
           with open("public/calendar.ics", "rb") as f:
               cal = Calendar.from_ical(f.read())
           events = [c for c in cal.walk() if c.name == "VEVENT"]
           print(f"✅ Validated: {len(events)} events in repaired ICS")
+          # Only check TZID references, not description text
           with open("public/calendar.ics", "r") as f:
               content = f.read()
-          bad_tzids = [
-              "AUS Eastern Standard Time",
-              "Eastern Standard Time",
-              "Pacific Standard Time",
-          ]
-          for tz in bad_tzids:
-              if tz in content:
-                  print(f"⚠️  WARNING: Microsoft TZID '{tz}' still present!")
-                  exit(1)
-          print("✅ All TZIDs are IANA-compliant")
+          tzid_refs = re.findall(r'TZID[=:]([^\s;:]+)', content)
+          bad = [t for t in tzid_refs if t not in (
+              "Australia/Melbourne", "Australia/Brisbane", "Australia/Adelaide",
+              "Australia/Perth", "Australia/Hobart", "America/New_York",
+              "America/Los_Angeles", "America/Chicago", "America/Denver",
+              "Europe/London", "Europe/Berlin", "Europe/Paris",
+              "Asia/Tokyo", "Asia/Shanghai", "Asia/Kolkata",
+              "Pacific/Auckland",
+          )]
+          if bad:
+              print(f"⚠️  Non-IANA TZIDs found: {set(bad)}")
+              exit(1)
+          print(f"✅ All {len(tzid_refs)} TZID references are IANA-compliant")
           PY
 
       - name: Setup GitHub Pages
@@ -83,3 +88,4 @@ jobs:
 
       - name: Deploy to GitHub Pages
         uses: actions/deploy-pages@v4
+
