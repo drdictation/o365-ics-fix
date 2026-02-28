@@ -1,12 +1,21 @@
-name: Sync and publish fixed ICS
+name: Publish Calendar ICS
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: "*/5 * * * *"
+  push:
+    branches: [ "main" ]
+    paths:
+      - "calendar.ics"
+      - ".github/workflows/publish_calendar.yml"
+  workflow_dispatch: {}
 
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -16,96 +25,154 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install validator dependency
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install icalendar
 
-      - name: Generate fixed ICS (root)
-        env:
-          OFFICE_ICS_URL: ${{ secrets.OFFICE_ICS_URL }}
-          OUT_ICS_PATH: calendar_fixed.ics
-          SCRUB_DETAILS: "1"
-        run: |
-          python sync_ics.py
-
-      - name: Repair malformed ICS (remove nested VEVENT blocks)
+      - name: Repair ICS (denest + normalise TZID exceptions to UTC)
         run: |
           python - <<'PY'
           import re
+          from datetime import datetime
 
-          path = "calendar_fixed.ics"
-          raw = open(path, "r", encoding="utf-8", errors="ignore").read()
+          SRC = "calendar.ics"
+          DST = "calendar_fixed.ics"
 
-          # Normalize newlines
+          raw = open(SRC, "r", encoding="utf-8", errors="ignore").read()
           raw = raw.replace("\r\n", "\n").replace("\r", "\n")
-
           lines = raw.split("\n")
 
+          # ----------------------------
+          # 1) Remove nested VEVENT blocks
+          # ----------------------------
           out = []
           vevent_depth = 0
           skipping_nested = False
           nested_depth = 0
 
           for line in lines:
-            if line == "BEGIN:VEVENT":
-              if vevent_depth == 0:
-                vevent_depth = 1
-                out.append(line)
-              else:
-                # nested VEVENT -> skip until its END:VEVENT
-                skipping_nested = True
-                nested_depth = 1
-              continue
-
-            if line == "END:VEVENT":
-              if skipping_nested:
-                nested_depth -= 1
-                if nested_depth <= 0:
-                  skipping_nested = False
-                continue
-              else:
-                if vevent_depth > 0:
-                  vevent_depth = 0
-                out.append(line)
-                continue
-
-            if skipping_nested:
-              # track any extra nesting just in case
               if line == "BEGIN:VEVENT":
-                nested_depth += 1
-              elif line == "END:VEVENT":
-                nested_depth -= 1
-              continue
+                  if vevent_depth == 0:
+                      vevent_depth = 1
+                      out.append(line)
+                  else:
+                      skipping_nested = True
+                      nested_depth = 1
+                  continue
 
-            out.append(line)
+              if line == "END:VEVENT":
+                  if skipping_nested:
+                      nested_depth -= 1
+                      if nested_depth <= 0:
+                          skipping_nested = False
+                      continue
+                  else:
+                      vevent_depth = 0
+                      out.append(line)
+                      continue
 
-          fixed = "\n".join(out)
+              if skipping_nested:
+                  if line == "BEGIN:VEVENT":
+                      nested_depth += 1
+                  elif line == "END:VEVENT":
+                      nested_depth -= 1
+                  continue
 
-          # Extra hardening: kill the common broken pattern exactly (if still present)
-          fixed = fixed.replace("BEGIN:VEVENT\nCLASS:PUBLIC\nEND:VEVENT\n", "CLASS:PUBLIC\n")
+              out.append(line)
 
-          # Ensure file ends cleanly with END:VCALENDAR
-          if "END:VCALENDAR" not in fixed:
-            # if it got lost somehow, append it
-            fixed = fixed.rstrip("\n") + "\nEND:VCALENDAR\n"
+          lines = out
+
+          # ----------------------------
+          # 2) Normalise EXDATE / RECURRENCE-ID TZIDs to UTC Z
+          # Google is flaky with Windows TZIDs like "AUS Eastern Standard Time"
+          # ----------------------------
+          try:
+              from zoneinfo import ZoneInfo
+          except Exception:
+              ZoneInfo = None
+
+          tz_map = {
+              "AUS Eastern Standard Time": "Australia/Melbourne",
+              "Tasmania Standard Time": "Australia/Hobart",
+          }
+
+          def to_utc_z(local_str: str, iana_tz: str) -> str | None:
+              # local_str: YYYYMMDDTHHMM or YYYYMMDDTHHMMSS
+              if len(local_str) == 13:  # YYYYMMDDTHHMM
+                  local_str += "00"
+              dt = datetime.strptime(local_str, "%Y%m%dT%H%M%S")
+              if ZoneInfo is None:
+                  return None
+              local = dt.replace(tzinfo=ZoneInfo(iana_tz))
+              utc = local.astimezone(ZoneInfo("UTC"))
+              return utc.strftime("%Y%m%dT%H%M%SZ")
+
+          fixed = []
+          for line in lines:
+              m = re.match(r'^(EXDATE|RECURRENCE-ID);TZID="?([^":]+)"?:(\d{8}T\d{4,6})$', line)
+              if m:
+                  prop, win_tz, value = m.group(1), m.group(2), m.group(3)
+                  iana = tz_map.get(win_tz)
+                  if iana:
+                      z = to_utc_z(value, iana)
+                      if z:
+                          fixed.append(f"{prop}:{z}")
+                          continue
+              fixed.append(line)
+
+          # ----------------------------
+          # 3) Ensure END:VCALENDAR exactly once and final newline
+          # ----------------------------
+          text = "\n".join(fixed).strip("\n")
+          if "END:VCALENDAR" in text:
+              text = text.split("END:VCALENDAR", 1)[0].rstrip("\n") + "\nEND:VCALENDAR\n"
           else:
-            # remove anything after END:VCALENDAR
-            fixed = fixed.split("END:VCALENDAR", 1)[0] + "END:VCALENDAR\n"
+              text = text + "\nEND:VCALENDAR\n"
 
-          open(path, "w", encoding="utf-8").write(fixed)
-          print("ICS repaired: nested VEVENT blocks removed.")
+          open(DST, "w", encoding="utf-8").write(text)
+          print(f"Wrote {DST}")
           PY
 
-      - name: Commit updated ICS
+      - name: Validate ICS parses (hard fail if broken)
         run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@users.noreply.github.com"
-          git add calendar_fixed.ics
-          git commit -m "Update fixed ICS" || exit 0
-          git push
+          python - <<'PY'
+          from icalendar import Calendar
+          data = open("calendar_fixed.ics", "rb").read()
+          cal = Calendar.from_ical(data)  # raises if invalid
+          events = [c for c in cal.walk() if c.name == "VEVENT"]
+          print(f"Parsed OK. VEVENT count: {len(events)}")
+          PY
+
+      - name: Prepare Pages artifact
+        run: |
+          mkdir -p public
+          cp calendar_fixed.ics public/calendar.ics
+          # minimal index so you can open the pages site and confirm it deployed
+          cat > public/index.html <<'HTML'
+          <!doctype html>
+          <html>
+            <head><meta charset="utf-8"><title>Calendar</title></head>
+            <body>
+              <h1>Calendar ICS</h1>
+              <p><a href="./calendar.ics">Download calendar.ics</a></p>
+            </body>
+          </html>
+          HTML
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
