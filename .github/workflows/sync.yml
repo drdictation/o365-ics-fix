@@ -34,20 +34,72 @@ jobs:
         run: |
           python sync_ics.py
 
-      - name: Remove invalid nested VEVENT blocks
+      - name: Repair malformed ICS (remove nested VEVENT blocks)
         run: |
           python - <<'PY'
-          p = "calendar_fixed.ics"
-          s = open(p, "r", encoding="utf-8", errors="ignore").read()
+          import re
 
-          # Remove the broken nested VEVENT block
-          s = s.replace(
-              "BEGIN:VEVENT\nCLASS:PUBLIC\nEND:VEVENT\n",
-              "CLASS:PUBLIC\n"
-          )
+          path = "calendar_fixed.ics"
+          raw = open(path, "r", encoding="utf-8", errors="ignore").read()
 
-          open(p, "w", encoding="utf-8").write(s)
-          print("Patched nested VEVENT blocks.")
+          # Normalize newlines
+          raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+
+          lines = raw.split("\n")
+
+          out = []
+          vevent_depth = 0
+          skipping_nested = False
+          nested_depth = 0
+
+          for line in lines:
+            if line == "BEGIN:VEVENT":
+              if vevent_depth == 0:
+                vevent_depth = 1
+                out.append(line)
+              else:
+                # nested VEVENT -> skip until its END:VEVENT
+                skipping_nested = True
+                nested_depth = 1
+              continue
+
+            if line == "END:VEVENT":
+              if skipping_nested:
+                nested_depth -= 1
+                if nested_depth <= 0:
+                  skipping_nested = False
+                continue
+              else:
+                if vevent_depth > 0:
+                  vevent_depth = 0
+                out.append(line)
+                continue
+
+            if skipping_nested:
+              # track any extra nesting just in case
+              if line == "BEGIN:VEVENT":
+                nested_depth += 1
+              elif line == "END:VEVENT":
+                nested_depth -= 1
+              continue
+
+            out.append(line)
+
+          fixed = "\n".join(out)
+
+          # Extra hardening: kill the common broken pattern exactly (if still present)
+          fixed = fixed.replace("BEGIN:VEVENT\nCLASS:PUBLIC\nEND:VEVENT\n", "CLASS:PUBLIC\n")
+
+          # Ensure file ends cleanly with END:VCALENDAR
+          if "END:VCALENDAR" not in fixed:
+            # if it got lost somehow, append it
+            fixed = fixed.rstrip("\n") + "\nEND:VCALENDAR\n"
+          else:
+            # remove anything after END:VCALENDAR
+            fixed = fixed.split("END:VCALENDAR", 1)[0] + "END:VCALENDAR\n"
+
+          open(path, "w", encoding="utf-8").write(fixed)
+          print("ICS repaired: nested VEVENT blocks removed.")
           PY
 
       - name: Commit updated ICS
