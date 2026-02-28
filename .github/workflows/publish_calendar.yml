@@ -1,12 +1,9 @@
 name: Publish Calendar ICS
 
 on:
-  push:
-    branches: ["main"]
-    paths:
-      - "calendar.ics"
-      - ".github/workflows/publish_calendar.yml"
-      - "repair_ics.py"
+  schedule:
+    # Run every 5 minutes
+    - cron: "*/5 * * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -26,20 +23,22 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Debug - List repository files
+      - name: Fetch calendar from Microsoft 365
+        env:
+          MS_CALENDAR_ICS_URL: ${{ secrets.MS_CALENDAR_ICS_URL }}
         run: |
-          echo "PWD=$(pwd)"
-          echo "=== Top-level ==="
-          ls -la
-          echo "=== Recursive ==="
-          ls -R
-          echo "=== Confirm calendar.ics exists ==="
-          if [ -f calendar.ics ]; then
-            echo "✅ calendar.ics found ($(wc -l < calendar.ics) lines)"
-          else
-            echo "❌ calendar.ics NOT FOUND"
+          if [ -z "$MS_CALENDAR_ICS_URL" ]; then
+            echo "❌ MS_CALENDAR_ICS_URL secret is not set!"
+            echo "Go to repo Settings → Secrets → Actions → New secret"
+            echo "Name: MS_CALENDAR_ICS_URL"
+            echo "Value: your Outlook published ICS URL"
             exit 1
           fi
+          echo "Fetching calendar from Microsoft 365..."
+          curl -fSL --retry 3 --retry-delay 5 -o calendar.ics "$MS_CALENDAR_ICS_URL"
+          LINES=$(wc -l < calendar.ics)
+          EVENTS=$(grep -c "BEGIN:VEVENT" calendar.ics || true)
+          echo "✅ Fetched calendar.ics ($LINES lines, $EVENTS events)"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -60,15 +59,17 @@ jobs:
               cal = Calendar.from_ical(f.read())
           events = [c for c in cal.walk() if c.name == "VEVENT"]
           print(f"✅ Validated: {len(events)} events in repaired ICS")
-          # Confirm no Microsoft TZIDs remain
           with open("public/calendar.ics", "r") as f:
               content = f.read()
-          if "AUS Eastern Standard Time" in content:
-              print("⚠️  WARNING: Microsoft TZID still present!")
-              exit(1)
-          if "Eastern Standard Time" in content and "Australia" not in content:
-              print("⚠️  WARNING: Non-IANA Eastern Standard Time TZID still present!")
-              exit(1)
+          bad_tzids = [
+              "AUS Eastern Standard Time",
+              "Eastern Standard Time",
+              "Pacific Standard Time",
+          ]
+          for tz in bad_tzids:
+              if tz in content:
+                  print(f"⚠️  WARNING: Microsoft TZID '{tz}' still present!")
+                  exit(1)
           print("✅ All TZIDs are IANA-compliant")
           PY
 
