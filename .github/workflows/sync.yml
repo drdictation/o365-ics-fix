@@ -1,28 +1,42 @@
 name: Sync and publish fixed ICS
 
 on:
+  workflow_dispatch:
   schedule:
     - cron: "*/5 * * * *"
-  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Fetch ICS
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
         run: |
-          curl -L "${{ secrets.OFFICE_ICS_URL }}" -o calendar.ics
-      - name: Fix timezone issue
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Generate fixed ICS (root)
+        env:
+          OFFICE_ICS_URL: ${{ secrets.OFFICE_ICS_URL }}
+          OUT_ICS_PATH: calendar_fixed.ics
+          SCRUB_DETAILS: "1"
         run: |
-          sed 's;TZID=AUS Eastern Standard Time:;g' calendar.ics > calendar_fixed.ics
+          python sync_ics.py
 
       - name: Commit updated ICS
         run: |
-          git config --global user.name "github-actions"
-          git config --global user.email "actions@github.com"
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
           git add calendar_fixed.ics
-          git commit -m "Update ICS" || echo "No changes"
+          git commit -m "Update fixed ICS" || exit 0
           git push
