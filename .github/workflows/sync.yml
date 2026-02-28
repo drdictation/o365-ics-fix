@@ -11,6 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -32,6 +33,22 @@ jobs:
           SCRUB_DETAILS: "1"
         run: |
           python sync_ics.py
+
+      - name: Remove invalid nested VEVENT blocks
+        run: |
+          python - <<'PY'
+          p = "calendar_fixed.ics"
+          s = open(p, "r", encoding="utf-8", errors="ignore").read()
+
+          # Remove the broken nested VEVENT block
+          s = s.replace(
+              "BEGIN:VEVENT\nCLASS:PUBLIC\nEND:VEVENT\n",
+              "CLASS:PUBLIC\n"
+          )
+
+          open(p, "w", encoding="utf-8").write(s)
+          print("Patched nested VEVENT blocks.")
+          PY
 
       - name: Commit updated ICS
         run: |
