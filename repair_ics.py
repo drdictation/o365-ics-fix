@@ -186,8 +186,19 @@ def repair_ics(src: str, dst: str) -> None:
 
     output_lines = []
     header_done = False
+    skip_folded = False  # True when we're skipping a multi-line property
     for line in lines:
         stripped = line.strip()
+
+        # Handle line folding: continuation lines start with a space/tab
+        # If we're skipping a property (like DESCRIPTION), also skip its
+        # continuation lines
+        if skip_folded:
+            if line.startswith(" ") or line.startswith("\t"):
+                continue  # Skip this continuation line
+            else:
+                skip_folded = False  # New property starts, stop skipping
+
         if not header_done and stripped == "BEGIN:VCALENDAR":
             output_lines.append("BEGIN:VCALENDAR")
             # Ensure required properties exist right after BEGIN:VCALENDAR
@@ -213,6 +224,12 @@ def repair_ics(src: str, dst: str) -> None:
         if stripped.startswith("PRODID:"):
             continue
         if stripped.startswith("METHOD:"):
+            continue
+
+        # Strip DESCRIPTION fields — Microsoft Exchange embeds massive
+        # HTML/URL text that breaks Google Calendar's ICS parser
+        if stripped.startswith("DESCRIPTION:"):
+            skip_folded = True  # Also skip continuation lines
             continue
 
         # Strip Microsoft-specific properties that confuse Google
@@ -252,5 +269,6 @@ def repair_ics(src: str, dst: str) -> None:
 
 if __name__ == "__main__":
     repair_ics(SRC, DST)
+
 
 
