@@ -81,6 +81,33 @@ TZOFFSETTO:-0400
 RRULE:FREQ=YEARLY;BYDAY=2SU;BYMONTH=3
 END:DAYLIGHT
 END:VTIMEZONE""",
+
+    "Australia/Brisbane": """\
+BEGIN:VTIMEZONE
+TZID:Australia/Brisbane
+BEGIN:STANDARD
+DTSTART:16010101T000000
+TZOFFSETFROM:+1000
+TZOFFSETTO:+1000
+END:STANDARD
+END:VTIMEZONE""",
+
+    "America/Los_Angeles": """\
+BEGIN:VTIMEZONE
+TZID:America/Los_Angeles
+BEGIN:STANDARD
+DTSTART:16010101T020000
+TZOFFSETFROM:-0700
+TZOFFSETTO:-0800
+RRULE:FREQ=YEARLY;BYDAY=1SU;BYMONTH=11
+END:STANDARD
+BEGIN:DAYLIGHT
+DTSTART:16010101T020000
+TZOFFSETFROM:-0800
+TZOFFSETTO:-0700
+RRULE:FREQ=YEARLY;BYDAY=2SU;BYMONTH=3
+END:DAYLIGHT
+END:VTIMEZONE""",
 }
 
 
@@ -127,7 +154,18 @@ def repair_ics(src: str, dst: str) -> None:
         # Replace in DTSTART;TZID=..., DTEND;TZID=..., etc.
         content = content.replace(f"TZID={ms_tz}", f"TZID={iana_tz}")
 
-    # ── Step 4: Remove old VTIMEZONE blocks, we'll add clean ones ────────
+    # ── Step 4: Prefix UIDs to prevent Google Calendar deduplication ──────
+    # Google Calendar silently drops events whose UID ends with @google.com
+    # because it thinks it already manages them. Prefixing makes UIDs unique
+    # to this subscription while keeping them stable across refreshes.
+    content = re.sub(
+        r"^(UID:)(.+)$",
+        r"\g<1>o365sync-\2",
+        content,
+        flags=re.MULTILINE,
+    )
+
+    # ── Step 5: Remove old VTIMEZONE blocks, we'll add clean ones ────────
     # Remove all existing VTIMEZONE blocks
     content = re.sub(
         r"BEGIN:VTIMEZONE\n.*?END:VTIMEZONE\n?",
@@ -153,9 +191,10 @@ def repair_ics(src: str, dst: str) -> None:
         if not header_done and stripped == "BEGIN:VCALENDAR":
             output_lines.append("BEGIN:VCALENDAR")
             # Ensure required properties exist right after BEGIN:VCALENDAR
+            # NOTE: METHOD:PUBLISH is intentionally omitted — it causes
+            # Google Calendar to reject events on import/subscribe
             output_lines.append("VERSION:2.0")
             output_lines.append("PRODID:-//Calendar Sync Pipeline//EN")
-            output_lines.append("METHOD:PUBLISH")
             output_lines.append("X-WR-CALNAME:Calendar")
             # Insert clean VTIMEZONE blocks
             for tz in sorted(used_tzids):
@@ -172,6 +211,20 @@ def repair_ics(src: str, dst: str) -> None:
         ):
             continue
         if stripped.startswith("PRODID:"):
+            continue
+        if stripped.startswith("METHOD:"):
+            continue
+
+        # Strip Microsoft-specific properties that confuse Google
+        if stripped.startswith("X-MICROSOFT-CDO-"):
+            continue
+        if stripped.startswith("X-MICROSOFT-DISALLOW-COUNTER"):
+            continue
+        if stripped.startswith("X-MICROSOFT-DONOTFORWARDMEETING"):
+            continue
+        if stripped.startswith("X-MICROSOFT-REQUESTEDATTENDANCEMODE"):
+            continue
+        if stripped.startswith("X-MICROSOFT-ISRESPONSEREQUESTED"):
             continue
 
         # Skip empty lines (ICS shouldn't have them)
@@ -199,4 +252,5 @@ def repair_ics(src: str, dst: str) -> None:
 
 if __name__ == "__main__":
     repair_ics(SRC, DST)
+
 
