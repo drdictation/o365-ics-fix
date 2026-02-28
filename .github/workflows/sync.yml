@@ -14,8 +14,7 @@ jobs:
 
       - name: Fetch ICS
         run: |
-          curl -L "${{ secrets.ICS_URL }}" -o calendar.ics
-
+          curl -L "${{ secrets.OFFICE_ICS_URL }}" -o calendar.ics
       - name: Fix timezone issue
         run: |
           sed 's;TZID=AUS Eastern Standard Time:;g' calendar.ics > calendar_fixed.ics
