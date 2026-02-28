@@ -1,0 +1,84 @@
+name: Publish Calendar ICS
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "calendar.ics"
+      - ".github/workflows/publish_calendar.yml"
+      - "repair_ics.py"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Debug - List repository files
+        run: |
+          echo "PWD=$(pwd)"
+          echo "=== Top-level ==="
+          ls -la
+          echo "=== Recursive ==="
+          ls -R
+          echo "=== Confirm calendar.ics exists ==="
+          if [ -f calendar.ics ]; then
+            echo "✅ calendar.ics found ($(wc -l < calendar.ics) lines)"
+          else
+            echo "❌ calendar.ics NOT FOUND"
+            exit 1
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install icalendar
+
+      - name: Repair ICS for Google Calendar compatibility
+        run: python repair_ics.py
+
+      - name: Validate repaired ICS
+        run: |
+          python << 'PY'
+          from icalendar import Calendar
+          with open("public/calendar.ics", "rb") as f:
+              cal = Calendar.from_ical(f.read())
+          events = [c for c in cal.walk() if c.name == "VEVENT"]
+          print(f"✅ Validated: {len(events)} events in repaired ICS")
+          # Confirm no Microsoft TZIDs remain
+          with open("public/calendar.ics", "r") as f:
+              content = f.read()
+          if "AUS Eastern Standard Time" in content:
+              print("⚠️  WARNING: Microsoft TZID still present!")
+              exit(1)
+          if "Eastern Standard Time" in content and "Australia" not in content:
+              print("⚠️  WARNING: Non-IANA Eastern Standard Time TZID still present!")
+              exit(1)
+          print("✅ All TZIDs are IANA-compliant")
+          PY
+
+      - name: Setup GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
