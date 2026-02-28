@@ -172,7 +172,9 @@ def main():
     out_bytes = fixed.to_ical()
 
     # Ensure directory exists
-    os.makedirs(os.path.dirname(OUT_PATH), exist_ok=True)
+    out_dir = os.path.dirname(OUT_PATH)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
 
     # Only write if changed (prevents noisy commits)
     existing = b""
