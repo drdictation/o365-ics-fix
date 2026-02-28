@@ -2,7 +2,7 @@ name: Publish Calendar ICS
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
     paths:
       - "calendar.ics"
       - ".github/workflows/publish_calendar.yml"
@@ -22,157 +22,76 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Debug - List repository files
+        run: |
+          echo "Repository contents:"
+          ls -R
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install validator dependency
+      - name: Install dependency
         run: |
           python -m pip install --upgrade pip
           pip install icalendar
 
       - name: Repair ICS (denest + normalise TZID exceptions to UTC)
         run: |
-          python - <<'PY'
-          import re
-          from datetime import datetime
+          python << 'PY'
+          import os
+          from icalendar import Calendar
+          from datetime import timezone
 
           SRC = "calendar.ics"
           DST = "calendar_fixed.ics"
 
-          raw = open(SRC, "r", encoding="utf-8", errors="ignore").read()
-          raw = raw.replace("\r\n", "\n").replace("\r", "\n")
-          lines = raw.split("\n")
+          if not os.path.exists(SRC):
+              raise FileNotFoundError(f"{SRC} not found in repository root.")
 
-          # ----------------------------
-          # 1) Remove nested VEVENT blocks
-          # ----------------------------
-          out = []
-          vevent_depth = 0
-          skipping_nested = False
-          nested_depth = 0
+          with open(SRC, "rb") as f:
+              cal = Calendar.from_ical(f.read())
 
-          for line in lines:
-              if line == "BEGIN:VEVENT":
-                  if vevent_depth == 0:
-                      vevent_depth = 1
-                      out.append(line)
-                  else:
-                      skipping_nested = True
-                      nested_depth = 1
-                  continue
+          new_cal = Calendar()
+          for k, v in cal.property_items():
+              new_cal.add(k, v)
 
-              if line == "END:VEVENT":
-                  if skipping_nested:
-                      nested_depth -= 1
-                      if nested_depth <= 0:
-                          skipping_nested = False
-                      continue
-                  else:
-                      vevent_depth = 0
-                      out.append(line)
-                      continue
+          for component in cal.walk():
+              if component.name == "VEVENT":
+                  if component.get("DTSTART") and hasattr(component["DTSTART"], "dt"):
+                      dt = component["DTSTART"].dt
+                      if hasattr(dt, "tzinfo") and dt.tzinfo is not None:
+                          component["DTSTART"].dt = dt.astimezone(timezone.utc)
 
-              if skipping_nested:
-                  if line == "BEGIN:VEVENT":
-                      nested_depth += 1
-                  elif line == "END:VEVENT":
-                      nested_depth -= 1
-                  continue
+                  if component.get("DTEND") and hasattr(component["DTEND"], "dt"):
+                      dt = component["DTEND"].dt
+                      if hasattr(dt, "tzinfo") and dt.tzinfo is not None:
+                          component["DTEND"].dt = dt.astimezone(timezone.utc)
 
-              out.append(line)
+                  new_cal.add_component(component)
 
-          lines = out
+          with open(DST, "wb") as f:
+              f.write(new_cal.to_ical())
 
-          # ----------------------------
-          # 2) Normalise EXDATE / RECURRENCE-ID TZIDs to UTC Z
-          # Google is flaky with Windows TZIDs like "AUS Eastern Standard Time"
-          # ----------------------------
-          try:
-              from zoneinfo import ZoneInfo
-          except Exception:
-              ZoneInfo = None
-
-          tz_map = {
-              "AUS Eastern Standard Time": "Australia/Melbourne",
-              "Tasmania Standard Time": "Australia/Hobart",
-          }
-
-          def to_utc_z(local_str: str, iana_tz: str) -> str | None:
-              # local_str: YYYYMMDDTHHMM or YYYYMMDDTHHMMSS
-              if len(local_str) == 13:  # YYYYMMDDTHHMM
-                  local_str += "00"
-              dt = datetime.strptime(local_str, "%Y%m%dT%H%M%S")
-              if ZoneInfo is None:
-                  return None
-              local = dt.replace(tzinfo=ZoneInfo(iana_tz))
-              utc = local.astimezone(ZoneInfo("UTC"))
-              return utc.strftime("%Y%m%dT%H%M%SZ")
-
-          fixed = []
-          for line in lines:
-              m = re.match(r'^(EXDATE|RECURRENCE-ID);TZID="?([^":]+)"?:(\d{8}T\d{4,6})$', line)
-              if m:
-                  prop, win_tz, value = m.group(1), m.group(2), m.group(3)
-                  iana = tz_map.get(win_tz)
-                  if iana:
-                      z = to_utc_z(value, iana)
-                      if z:
-                          fixed.append(f"{prop}:{z}")
-                          continue
-              fixed.append(line)
-
-          # ----------------------------
-          # 3) Ensure END:VCALENDAR exactly once and final newline
-          # ----------------------------
-          text = "\n".join(fixed).strip("\n")
-          if "END:VCALENDAR" in text:
-              text = text.split("END:VCALENDAR", 1)[0].rstrip("\n") + "\nEND:VCALENDAR\n"
-          else:
-              text = text + "\nEND:VCALENDAR\n"
-
-          open(DST, "w", encoding="utf-8").write(text)
-          print(f"Wrote {DST}")
+          print("ICS repaired successfully.")
           PY
 
-      - name: Validate ICS parses (hard fail if broken)
+      - name: Prepare Pages content
         run: |
-          python - <<'PY'
-          from icalendar import Calendar
-          data = open("calendar_fixed.ics", "rb").read()
-          cal = Calendar.from_ical(data)  # raises if invalid
-          events = [c for c in cal.walk() if c.name == "VEVENT"]
-          print(f"Parsed OK. VEVENT count: {len(events)}")
-          PY
-
-      - name: Prepare Pages artifact
-        run: |
-          mkdir -p public
+          mkdir public
           cp calendar_fixed.ics public/calendar.ics
-          # minimal index so you can open the pages site and confirm it deployed
-          cat > public/index.html <<'HTML'
-          <!doctype html>
-          <html>
-            <head><meta charset="utf-8"><title>Calendar</title></head>
-            <body>
-              <h1>Calendar ICS</h1>
-              <p><a href="./calendar.ics">Download calendar.ics</a></p>
-            </body>
-          </html>
-          HTML
 
-      - name: Upload Pages artifact
+      - name: Setup GitHub Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: public
 
-  deploy:
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
       - name: Deploy to GitHub Pages
         uses: actions/deploy-pages@v4
